@@ -1,0 +1,27 @@
+# .gitignore for Python and Rust
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pyz
+*.pyzw
+*.egg-info/
+dist/
+build/
+*.egg
+*.so
+*.venv
+*.log
+*.csv
+*.dat
+*.out
+*.pid
+*.gz
+*.sqlite
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
