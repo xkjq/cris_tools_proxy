@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 #zmq = "0.10.0"
 nng = "1.0.1"
+rfd = "0.14.1"
