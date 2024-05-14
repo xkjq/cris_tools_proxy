@@ -1,9 +1,11 @@
 [package]
-name = "zeromq_client"
+name = "cris_tools_proxy"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# ZeroMQ has trouble building on Windows gnu
 #zmq = "0.10.0"
+# So we use nng
 nng = "1.0.1"
 rfd = "0.14.1"

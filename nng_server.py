@@ -1,4 +1,7 @@
 import pynng
+"""
+A simple nng server that listens for messages from clients and sends a response back.
+"""
 
 def main():
     # Create a rep socket
