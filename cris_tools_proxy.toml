@@ -1,0 +1,2 @@
+port = 5555
+cris_tools_path = "path/to/cris-tools"

@@ -9,3 +9,5 @@ edition = "2021"
 # So we use nng
 nng = "1.0.1"
 rfd = "0.14.1"
+toml = "0.8.13"
+serde = { version = "1.0", features = ["derive"] }
