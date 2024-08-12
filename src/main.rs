@@ -29,9 +29,6 @@ fn main() {
         }
     };
 
-    // Get the command line argument
-    let arg = std::env::args().nth(1).expect("Missing argument");
-
     // Create a socket of type REQ (request)
     let socket = Socket::new(Protocol::Req0).expect("Failed to create socket");
 
@@ -75,6 +72,16 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    // Get the command line argument
+    //let arg = std::env::args().nth(1).expect("Missing argument");
+    let arg = match std::env::args().nth(1) {
+        Some(arg) => arg,
+        None => {
+            eprintln!("Missing argument");
+            std::process::exit(1);
+        }
+    };
 
     // Send the argument to the server
     let message = "run/".to_string() + &arg;
