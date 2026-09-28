@@ -1,16 +1,21 @@
+use nng::options::{Options, RecvTimeout, SendTimeout};
 use nng::{Protocol, Socket, Error};
 use rfd::MessageDialog;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct Settings {
     cris_tools_path: PathBuf,
-    port: toml::Value,
+    /// Port the app listens on. Typed as a number so `tcp://localhost:{port}`
+    /// is always a valid URL (a quoted TOML string used to render with quotes).
+    port: u16,
     /// Directory containing `app/current.txt` and the versioned build zips.
-    /// Defaults to the working directory, which is the deployment share.
+    /// Defaults to the directory containing the executable, not the working
+    /// directory: Dragon may launch the proxy with an arbitrary CWD.
     #[serde(default)]
     app_root: Option<PathBuf>,
 }
@@ -21,21 +26,51 @@ const CURRENT_FILE: &str = "current.txt";
 /// Layout inside the extracted zip: `<root>/cris_tools/cris_tools.exe`.
 const EXE_SUBDIR: &str = "cris_tools";
 const EXE_NAME: &str = "cris_tools.exe";
+/// Settings file name, resolved next to the executable (see `settings_path`).
+const SETTINGS_FILE: &str = "cris_tools_proxy.toml";
+/// NNG send/receive timeout. Without this a wedged app listener could block
+/// the REQ socket (and therefore Dragon) indefinitely.
+const SOCKET_TIMEOUT: Duration = Duration::from_millis(5000);
 
-fn load_settings() -> Result<Settings, toml::de::Error> {
-    // Read the entire contents of the file
-    let contents = fs::read_to_string("cris_tools_proxy.toml")
-        .expect("Failed to read settings file");
-
-    // Parse the file contents and deserialize into the Settings struct
-    toml::from_str(&contents)
+/// Directory containing this executable, falling back to the working directory
+/// when the path cannot be resolved (e.g. `current_exe` fails).
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn app_root(settings: &Settings) -> PathBuf {
-    settings
-        .app_root
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."))
+/// Locate `cris_tools_proxy.toml`. Prefer the directory beside the executable
+/// so the proxy works no matter what working directory Dragon launches it in;
+/// fall back to the working directory for development.
+fn settings_path() -> PathBuf {
+    let beside_exe = exe_dir().join(SETTINGS_FILE);
+    if beside_exe.is_file() {
+        return beside_exe;
+    }
+    PathBuf::from(SETTINGS_FILE)
+}
+
+fn load_settings() -> Result<Settings, Box<dyn std::error::Error>> {
+    let path = settings_path();
+    let contents = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings file {}: {e}", path.display()))?;
+
+    // Parse the file contents and deserialize into the Settings struct
+    Ok(toml::from_str(&contents)?)
+}
+
+/// Base directory for the deployment share, relative `app_root` values in the
+/// config are resolved against the settings file's directory.
+fn app_root(settings: &Settings, settings_dir: &Path) -> PathBuf {
+    match &settings.app_root {
+        Some(root) if root.is_absolute() => root.clone(),
+        // A relative `app_root` is relative to the config, not the CWD.
+        Some(root) => settings_dir.join(root),
+        // No `app_root`: the share is wherever the config lives.
+        None => settings_dir.to_path_buf(),
+    }
 }
 
 /// Best-effort removal of everything in the cache except the version we keep.
@@ -157,14 +192,15 @@ mod progress {
 /// Extract `zip_path` into `dest`, reporting progress to `progress` if present.
 ///
 /// This replaces `ZipArchive::extract` so the one-time cache population can show
-/// determinate progress and honour the dialog's Cancel button.
+/// determinate progress and honour the dialog's Cancel button. Errors are
+/// `io::Error`s so the cancellation case is `ErrorKind::Interrupted`.
 fn extract_zip(
     zip_path: &Path,
     dest: &Path,
     progress: Option<&progress::ProgressDialog>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> std::io::Result<()> {
     let file = fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
 
     // Sum of uncompressed sizes, used as the progress bar's total.
     let total: u64 = (0..archive.len())
@@ -183,12 +219,11 @@ fn extract_zip(
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled by user",
-                )
-                .into());
+                ));
             }
         }
 
-        let mut entry = archive.by_index(i)?;
+        let mut entry = archive.by_index(i).map_err(std::io::Error::other)?;
         let Some(relative) = entry.enclosed_name() else {
             continue;
         };
@@ -218,40 +253,45 @@ fn extract_zip(
 /// Ensure the currently published build is present in the local cache and
 /// return the path to its executable.
 ///
-/// Returns `None` when there is nothing to cache (legacy layout, no cache dir,
+/// `Ok(None)` means there is nothing to cache (legacy layout, no cache dir,
 /// missing zip, ...); the caller then falls back to launching `cris_tools_path`
-/// directly, preserving the old behaviour.
+/// directly, preserving the old behaviour. `Err(Interrupted)` means the user
+/// cancelled the progress dialog and the caller must not launch anything.
 ///
 /// Fetching and unpacking from the share on first use (rather than running from
 /// the share) is what keeps startup fast and lets aggressive endpoint AV leave
 /// the app alone: the process image and its DLLs are already local and no
 /// per-launch extraction into `%TEMP%` happens.
-fn ensure_cached_build(app_root: &Path) -> Option<PathBuf> {
-    let version = current_version(app_root)?;
-    let cache_root = local_cache_root()?;
+fn ensure_cached_build(app_root: &Path) -> Result<Option<PathBuf>, std::io::Error> {
+    let Some(version) = current_version(app_root) else {
+        return Ok(None);
+    };
+    let Some(cache_root) = local_cache_root() else {
+        return Ok(None);
+    };
     let version_dir = cache_root.join(&version);
     let exe = version_dir.join(EXE_SUBDIR).join(EXE_NAME);
     if exe.is_file() {
         prune_old_versions(&cache_root, &version_dir);
-        return Some(exe);
+        return Ok(Some(exe));
     }
 
     let zip_path = app_root
         .join(APP_SUBDIR)
         .join(format!("cris_tools_{version}.zip"));
     if !zip_path.is_file() {
-        return None;
+        return Ok(None);
     }
 
     println!("Caching CRIS Tools {version} to {}", version_dir.display());
-    fs::create_dir_all(&cache_root).ok()?;
+    fs::create_dir_all(&cache_root)?;
 
     // Extract into a staging directory first, then rename, so a half-finished
     // extraction is never mistaken for a valid cache. The progress dialog is
     // shown only for this one-time cost.
     let staging = cache_root.join(format!(".staging-{version}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).ok()?;
+    fs::create_dir_all(&staging)?;
 
     // The progress dialog is scoped to the extraction so it closes before we
     // rename the build into place and launch it.
@@ -262,9 +302,14 @@ fn ensure_cached_build(app_root: &Path) -> Option<PathBuf> {
     };
 
     if let Err(e) = extract_result {
-        eprintln!("Failed to extract {zip_path:?}: {e:?}");
         let _ = fs::remove_dir_all(&staging);
-        return None;
+        // Cancellation is not a failure to fall back from: surface it so the
+        // caller does not launch a build the user just declined to prepare.
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+        eprintln!("Failed to extract {zip_path:?}: {e:?}");
+        return Ok(None);
     }
 
     if fs::rename(&staging, &version_dir).is_err() {
@@ -275,9 +320,9 @@ fn ensure_cached_build(app_root: &Path) -> Option<PathBuf> {
 
     if exe.is_file() {
         prune_old_versions(&cache_root, &version_dir);
-        Some(exe)
+        Ok(Some(exe))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -295,11 +340,11 @@ fn spawn(exe: &Path, cwd: Option<&Path>, data_dir: Option<&Path>) -> std::io::Re
 }
 
 /// Launch CRIS Tools, preferring a locally cached build.
-fn launch_cris_tools(settings: &Settings) -> std::io::Result<Child> {
-    let root = app_root(settings);
+fn launch_cris_tools(settings: &Settings, settings_dir: &Path) -> std::io::Result<Child> {
+    let root = app_root(settings, settings_dir);
     let root = fs::canonicalize(&root).unwrap_or(root);
 
-    match ensure_cached_build(&root) {
+    match ensure_cached_build(&root)? {
         Some(exe) => {
             println!("Launching cached build: {}", exe.display());
             spawn(&exe, Some(&root), Some(&root))
@@ -312,16 +357,27 @@ fn launch_cris_tools(settings: &Settings) -> std::io::Result<Child> {
 }
 
 fn main() {
+    let settings_path = settings_path();
+    let settings_dir = settings_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
     let settings = match load_settings() {
         Ok(settings) => settings,
         Err(e) => {
-            eprintln!("Failed to load settings: {:?}", e);
+            eprintln!("Failed to load settings: {e}");
             std::process::exit(1);
         }
     };
 
     // Create a socket of type REQ (request)
     let socket = Socket::new(Protocol::Req0).expect("Failed to create socket");
+
+    // Bound how long we wait on the app. Without this a wedged listener would
+    // block the REQ socket - and therefore Dragon - indefinitely.
+    let _ = socket.set_opt::<SendTimeout>(Some(SOCKET_TIMEOUT));
+    let _ = socket.set_opt::<RecvTimeout>(Some(SOCKET_TIMEOUT));
 
     // Connect to the NNG server
     match socket.dial(format!("tcp://localhost:{}", settings.port).as_str()) {
@@ -339,7 +395,7 @@ fn main() {
             match choice {
                 rfd::MessageDialogResult::Yes => {
                     println!("User chose Yes");
-                    match launch_cris_tools(&settings) {
+                    match launch_cris_tools(&settings, &settings_dir) {
                         Ok(_) => {
                             println!("CRIS Tools launched successfully");
                         }
@@ -364,28 +420,36 @@ fn main() {
     // Get the command line argument
     //let arg = std::env::args().nth(1).expect("Missing argument");
     let arg = match std::env::args().nth(1) {
-        Some(arg) => arg,
-        None => {
-            eprintln!("Missing argument");
-            std::process::exit(1);
+        Some(arg) if !arg.is_empty() => arg,
+        _ => {
+            eprintln!("Usage: cris_tools_proxy.exe <command>");
+            eprintln!("where <command> is a registered function in CRIS Tools.");
+            std::process::exit(2);
         }
     };
 
     // Send the argument to the server
     let message = "run/".to_string() + &arg;
-    socket.send(message.as_bytes()).expect("Failed to send message");
+    if let Err(e) = socket.send(message.as_bytes()) {
+        eprintln!("Failed to send command: {e:?}");
+        std::process::exit(1);
+    }
 
     // Receive the response from the server
     match socket.recv() {
         Ok(response) => {
-            let response = String::from_utf8(response.to_vec()).expect("Failed to receive response");
-            println!("Response: {}", response);
+            match String::from_utf8(response.to_vec()) {
+                Ok(response) => println!("Response: {}", response),
+                Err(_) => println!("Response contained invalid UTF-8"),
+            }
         }
         Err(Error::TimedOut) => {
             println!("Failed to receive response: Timeout");
+            std::process::exit(1);
         }
         Err(e) => {
             println!("Failed to receive response: {:?}", e);
+            std::process::exit(1);
         }
     }
 }

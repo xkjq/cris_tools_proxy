@@ -1,2 +1,17 @@
+# Settings for cris_tools_proxy.exe.
+#
+# This file is looked up next to the executable first, then in the working
+# directory, so Dragon can launch the proxy from any CWD.
+
+# Port the CRIS Tools command listener binds. Must match `[commands].port` in
+# the app's config/global.toml on the deployment share.
 port = 5555
+
+# Fallback executable used when no published build is found in `app/`
+# (legacy layout / first run before a build is published).
 cris_tools_path = "path/to/cris-tools"
+
+# Directory holding `app/current.txt` and the versioned build zips.
+# Optional: defaults to the directory containing this config file (the
+# deployment share). Relative paths are resolved against that directory.
+# app_root = "."
