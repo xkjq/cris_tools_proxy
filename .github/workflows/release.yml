@@ -21,3 +21,6 @@ jobs:
         with:
           RUSTTARGET: ${{ matrix.target }}
           ARCHIVE_TYPES: ${{ matrix.archive }}
+          # The image's default toolchain predates lockfile v4 / edition2024,
+          # which the committed Cargo.lock and its dependencies require.
+          TOOLCHAIN_VERSION: stable
