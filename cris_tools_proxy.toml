@@ -15,3 +15,12 @@ cris_tools_path = "path/to/cris-tools"
 # Optional: defaults to the directory containing this config file (the
 # deployment share). Relative paths are resolved against that directory.
 # app_root = "."
+
+# Refuse to send a command when the app's IPC token cannot be found, instead of
+# falling back to the legacy `run/<command>` protocol. Leave false during the
+# rollout; set true once every deployed CRIS Tools build supports tokens.
+# require_token = false
+
+# Override the location of the app's per-run token file. Defaults to
+# %LOCALAPPDATA%\cris-tools\ipc.token.
+# ipc_token_file = "C:\\Users\\me\\AppData\\Local\\cris-tools\\ipc.token"

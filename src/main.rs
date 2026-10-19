@@ -18,6 +18,15 @@ struct Settings {
     /// directory: Dragon may launch the proxy with an arbitrary CWD.
     #[serde(default)]
     app_root: Option<PathBuf>,
+    /// Refuse to send a command when the app's IPC token cannot be found,
+    /// instead of falling back to the pre-token `run/<command>` protocol.
+    /// Enable once every deployed CRIS Tools sends/accepts tokens.
+    #[serde(default)]
+    require_token: bool,
+    /// Override the location of the app's `ipc.token`. Defaults to
+    /// `%LOCALAPPDATA%\cris-tools\ipc.token` (`$XDG_RUNTIME_DIR` on Linux).
+    #[serde(default)]
+    ipc_token_file: Option<PathBuf>,
 }
 
 /// Share subdirectory holding the published builds and the `current.txt` pointer.
@@ -98,6 +107,45 @@ fn current_version(app_root: &Path) -> Option<String> {
     let contents = fs::read_to_string(app_root.join(APP_SUBDIR).join(CURRENT_FILE)).ok()?;
     let version = contents.trim().to_string();
     (!version.is_empty()).then_some(version)
+}
+
+/// Default path of the per-run IPC token written by CRIS Tools. Mirrors
+/// `cris_tools.ipc_token_path()`: prefer the per-user profile so other users on
+/// the same workstation cannot read it.
+fn default_ipc_token_path() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        return Some(PathBuf::from(base).join("cris-tools").join("ipc.token"));
+    }
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Some(PathBuf::from(base).join("cris-tools").join("ipc.token"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".cache")
+            .join("cris-tools")
+            .join("ipc.token")
+    })
+}
+
+/// Read the token CRIS Tools published for this run, if any.
+fn read_ipc_token(settings: &Settings, settings_dir: &Path) -> Option<String> {
+    let path = match &settings.ipc_token_file {
+        Some(path) if path.is_absolute() => path.clone(),
+        Some(path) => settings_dir.join(path),
+        None => default_ipc_token_path()?,
+    };
+    let token = fs::read_to_string(path).ok()?;
+    let token = token.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// Build the wire message. The tokened form is `run/<token>/<command>`; the
+/// legacy form (`run/<command>`) is only used while no token is available.
+fn command_message(token: Option<&str>, command: &str) -> String {
+    match token {
+        Some(token) => format!("run/{token}/{command}"),
+        None => format!("run/{command}"),
+    }
 }
 
 /// Windows-native progress dialog (`IProgressDialog`), shown while a build is
@@ -428,8 +476,16 @@ fn main() {
         }
     };
 
+    // Authenticate with the token CRIS Tools wrote for this run. If it is
+    // missing and the config requires one, never fall back to the legacy form.
+    let token = read_ipc_token(&settings, &settings_dir);
+    if settings.require_token && token.is_none() {
+        eprintln!("IPC token not found; is CRIS Tools fully started?");
+        std::process::exit(1);
+    }
+
     // Send the argument to the server
-    let message = "run/".to_string() + &arg;
+    let message = command_message(token.as_deref(), &arg);
     if let Err(e) = socket.send(message.as_bytes()) {
         eprintln!("Failed to send command: {e:?}");
         std::process::exit(1);
@@ -451,5 +507,65 @@ fn main() {
             println!("Failed to receive response: {:?}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokened_message_includes_token() {
+        assert_eq!(
+            command_message(Some("abc123"), "load_event"),
+            "run/abc123/load_event"
+        );
+    }
+
+    #[test]
+    fn legacy_message_has_no_token() {
+        assert_eq!(command_message(None, "load_event"), "run/load_event");
+    }
+
+    #[test]
+    fn token_file_prefers_localappdata() {
+        std::env::set_var("LOCALAPPDATA", "/tmp/localappdata");
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        assert_eq!(
+            default_ipc_token_path(),
+            Some(PathBuf::from("/tmp/localappdata/cris-tools/ipc.token"))
+        );
+        std::env::remove_var("LOCALAPPDATA");
+    }
+
+    #[test]
+    fn missing_token_file_reads_none() {
+        let settings = Settings {
+            cris_tools_path: PathBuf::from("missing"),
+            port: 5555,
+            app_root: None,
+            require_token: false,
+            ipc_token_file: Some(PathBuf::from("definitely-not-here.ipc")),
+        };
+        assert!(read_ipc_token(&settings, Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn token_file_is_read_and_trimmed() {
+        let dir = std::env::temp_dir().join(format!("proxy-token-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ipc.token");
+        fs::write(&path, "  deadbeef\n").unwrap();
+
+        let settings = Settings {
+            cris_tools_path: PathBuf::from("missing"),
+            port: 5555,
+            app_root: None,
+            require_token: false,
+            ipc_token_file: Some(path.clone()),
+        };
+        assert_eq!(read_ipc_token(&settings, Path::new(".")).as_deref(), Some("deadbeef"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

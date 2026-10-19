@@ -8,8 +8,24 @@ cris_tools_proxy.exe <command>
 ```
 
 `<command>` is the name of a registered automation in CRIS Tools (for example
-`load_event_history` or `launch_maxims`). The proxy sends `run/<command>` to the
-app's NNG listener on `tcp://localhost:<port>` and prints the response.
+`load_event_history` or `launch_maxims`). The proxy sends `run/<token>/<command>`
+to the app's NNG listener on `tcp://localhost:<port>` and prints the response,
+where `<token>` is read from the app's per-run `ipc.token` (see below). If no
+token is found it falls back to the legacy `run/<command>` form.
+
+## Authentication
+
+CRIS Tools writes a random token for the current run to
+`%LOCALAPPDATA%\cris-tools\ipc.token` (mode 0600; `$XDG_RUNTIME_DIR` on Linux)
+and rejects any command that does not present it. This stops other users or
+sessions on a shared workstation from driving clinical automations. The proxy
+reads the same file and includes the token on every request.
+
+Rollout: both sides accept the legacy form until
+`[commands] require_token = true` is set in the app's `config/global.toml`
+(and `require_token = true` in this proxy's config). Set the app's flag once
+every deployed proxy sends tokens, and the proxy's flag once every deployed app
+accepts them.
 
 ## Configuration (`cris_tools_proxy.toml`)
 
@@ -21,6 +37,8 @@ directory, so it works no matter what CWD the proxy is launched from.
 | `port` | Port the app's command listener binds. Must match `[commands].port` in the app's `config/global.toml`. |
 | `cris_tools_path` | Fallback executable used when no published build is found. |
 | `app_root` | Optional directory containing `app/current.txt` and the build zips. Defaults to the config file's directory; relative paths resolve against it. |
+| `require_token` | When true, refuse to send if the app's IPC token file is missing instead of using the legacy protocol. Default `false`. |
+| `ipc_token_file` | Optional override for the app's `ipc.token` path. Defaults to `%LOCALAPPDATA%\cris-tools\ipc.token`. |
 
 ## Launching a published build
 
