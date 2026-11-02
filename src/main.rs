@@ -2,7 +2,7 @@ use nng::options::{Options, RecvTimeout, SendTimeout};
 use nng::{Error, Protocol, Socket};
 use rfd::{MessageDialog, MessageLevel};
 use serde::Deserialize;
-use std::fs;
+use std::fs::{self, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -14,8 +14,8 @@ struct Settings {
     /// Port the app listens on. Typed as a number so `tcp://{host}:{port}` is
     /// always a valid URL (a quoted TOML string used to render with quotes).
     port: u16,
-    /// Host/address of the app's listener. Defaults to IPv4 loopback so
-    /// `localhost` resolving to IPv6 cannot hide an IPv4-only listener.
+    /// Host/address of the app's listener. Defaults to `localhost` to match
+    /// the app's own bind address; override this if the app listens elsewhere.
     #[serde(default = "default_host")]
     host: String,
     /// How long to wait for the app to accept a command and reply, in
@@ -47,7 +47,7 @@ struct Settings {
 }
 
 fn default_host() -> String {
-    "127.0.0.1".to_string()
+    "localhost".to_string()
 }
 
 fn default_timeout_ms() -> u64 {
@@ -219,6 +219,42 @@ fn prune_old_versions(cache_root: &Path, keep: &Path) {
 /// Root of the per-user run cache, e.g. `%LOCALAPPDATA%\cris-tools\run`.
 fn local_cache_root() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("cris-tools").join("run"))
+}
+
+/// Per-user lock file used to serialise launches between proxy processes.
+fn launch_lock_path() -> PathBuf {
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(base).join("cris-tools").join("launch.lock");
+    }
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(base).join("cris-tools").join("launch.lock");
+    }
+    std::env::temp_dir().join("cris-tools-launch.lock")
+}
+
+/// Held for as long as this process owns the launch. Dropping it releases the
+/// OS file lock, including if the process exits unexpectedly.
+struct LaunchLock {
+    _file: fs::File,
+}
+
+/// Try to become the process responsible for launching CRIS Tools. Returns
+/// `Ok(None)` when another proxy process is already launching it.
+fn try_acquire_launch_lock(path: &Path) -> std::io::Result<Option<LaunchLock>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(LaunchLock { _file: file })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// Versions become directory and file names in the cache, so only allow the
@@ -722,6 +758,60 @@ fn launch_and_report(settings: &Settings, settings_dir: &Path, config_path: &Pat
     }
 }
 
+/// Launch CRIS Tools, serialising launches so simultaneous commands cannot
+/// start several instances. Returns true when the app is ready.
+fn launch_once(
+    socket: &Socket,
+    settings: &Settings,
+    settings_dir: &Path,
+    config_path: &Path,
+    allow_prompt: bool,
+) -> bool {
+    let lock_path = launch_lock_path();
+    let _lock = match try_acquire_launch_lock(&lock_path) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            // Another proxy process is already launching it. Wait for that
+            // launch instead of starting a second instance.
+            println!("Another CRIS Tools launch is in progress; waiting...");
+            return match wait_for_app(socket, settings, settings_dir) {
+                Ok(()) => true,
+                Err(message) => {
+                    show_error("CRIS Tools did not start", &message);
+                    false
+                }
+            };
+        }
+        Err(e) => {
+            show_error(
+                "Failed to check launch status",
+                &format!(
+                    "Could not create the launch lock {}:\n{e}",
+                    lock_path.display()
+                ),
+            );
+            return false;
+        }
+    };
+
+    if allow_prompt && !confirm_launch(settings, settings_dir) {
+        println!("User chose not to launch CRIS Tools");
+        return false;
+    }
+
+    if !launch_and_report(settings, settings_dir, config_path) {
+        return false;
+    }
+
+    match wait_for_app(socket, settings, settings_dir) {
+        Ok(()) => true,
+        Err(message) => {
+            show_error("CRIS Tools did not start", &message);
+            false
+        }
+    }
+}
+
 fn main() {
     // With no command the proxy's only useful action is to make sure CRIS
     // Tools is running, so launch it without prompting in that case.
@@ -776,21 +866,15 @@ fn main() {
         Err(e) => {
             println!("Failed to connect to server: {:?}", e);
 
-            // In launch-only mode the launch is the request, so skip the
-            // "do you want to launch it?" prompt.
-            if !launch_only && !confirm_launch(&settings, &settings_dir) {
-                println!("User chose not to launch CRIS Tools");
-                std::process::exit(1);
-            }
-
-            if !launch_and_report(&settings, &settings_dir, &config_path) {
-                std::process::exit(1);
-            }
-
-            // Wait for readiness before sending a command, and so launch-only
-            // mode can report a clear error if the app never starts.
-            if let Err(message) = wait_for_app(&socket, &settings, &settings_dir) {
-                show_error("CRIS Tools did not start", &message);
+            // Serialise launches so simultaneous commands cannot start
+            // several CRIS Tools instances.
+            if !launch_once(
+                &socket,
+                &settings,
+                &settings_dir,
+                &config_path,
+                !launch_only,
+            ) {
                 std::process::exit(1);
             }
             println!("CRIS Tools is ready");
@@ -1001,8 +1085,8 @@ mod tests {
     }
 
     #[test]
-    fn socket_url_uses_ipv4_loopback_by_default() {
-        assert_eq!(socket_url(&default_host(), 5555), "tcp://127.0.0.1:5555");
+    fn socket_url_uses_localhost_by_default() {
+        assert_eq!(socket_url(&default_host(), 5555), "tcp://localhost:5555");
     }
 
     #[test]
@@ -1038,10 +1122,27 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_loopback_and_thirty_seconds() {
+    fn settings_default_to_localhost_and_thirty_seconds() {
         let settings: Settings =
             toml::from_str("cris_tools_path = \"cris_tools.exe\"\nport = 5555\n").unwrap();
-        assert_eq!(settings.host, "127.0.0.1");
+        assert_eq!(settings.host, "localhost");
         assert_eq!(settings.timeout_ms, DEFAULT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn launch_lock_allows_only_one_holder() {
+        let dir = std::env::temp_dir().join(format!("proxy-lock-test-{}", std::process::id()));
+        let path = dir.join("launch.lock");
+
+        let first = try_acquire_launch_lock(&path).unwrap();
+        assert!(first.is_some());
+        assert!(try_acquire_launch_lock(&path).unwrap().is_none());
+
+        drop(first);
+        let third = try_acquire_launch_lock(&path).unwrap();
+        assert!(third.is_some());
+
+        drop(third);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
