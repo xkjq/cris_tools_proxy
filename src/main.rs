@@ -723,16 +723,9 @@ fn launch_and_report(settings: &Settings, settings_dir: &Path, config_path: &Pat
 }
 
 fn main() {
-    // Validate the command before loading settings or connecting: a bare
-    // invocation must not prompt to launch CRIS Tools.
-    let arg = match std::env::args().nth(1) {
-        Some(arg) if !arg.is_empty() => arg,
-        _ => {
-            eprintln!("Usage: cris_tools_proxy.exe <command>");
-            eprintln!("where <command> is a registered function in CRIS Tools.");
-            std::process::exit(2);
-        }
-    };
+    // With no command the proxy's only useful action is to make sure CRIS
+    // Tools is running, so launch it without prompting in that case.
+    let command = std::env::args().nth(1).filter(|arg| !arg.is_empty());
 
     let config_path = settings_path();
     let settings_dir = config_path
@@ -771,11 +764,21 @@ fn main() {
 
     // Connect to the NNG server, allowing a short window for an app that is
     // already starting up before deciding it is not running.
+    let launch_only = command.is_none();
     match connect_with_retry(&socket, &settings) {
-        Ok(()) => println!("Connected to server"),
+        Ok(()) => {
+            println!("Connected to server");
+            if launch_only {
+                println!("CRIS Tools is already running");
+                return;
+            }
+        }
         Err(e) => {
             println!("Failed to connect to server: {:?}", e);
-            if !confirm_launch(&settings, &settings_dir) {
+
+            // In launch-only mode the launch is the request, so skip the
+            // "do you want to launch it?" prompt.
+            if !launch_only && !confirm_launch(&settings, &settings_dir) {
                 println!("User chose not to launch CRIS Tools");
                 std::process::exit(1);
             }
@@ -784,15 +787,21 @@ fn main() {
                 std::process::exit(1);
             }
 
-            // Deliver the original command once the app is ready rather than
-            // making the user repeat it.
+            // Wait for readiness before sending a command, and so launch-only
+            // mode can report a clear error if the app never starts.
             if let Err(message) = wait_for_app(&socket, &settings, &settings_dir) {
                 show_error("CRIS Tools did not start", &message);
                 std::process::exit(1);
             }
             println!("CRIS Tools is ready");
+
+            if launch_only {
+                return;
+            }
         }
     }
+
+    let Some(arg) = command else { return };
 
     // Authenticate with the token CRIS Tools wrote for this run. If it is
     // missing and the config requires one, never fall back to the legacy form.

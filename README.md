@@ -4,14 +4,19 @@ A small Rust program that lets voice commands (for example from Dragon) drive
 CRIS Tools over a local socket. If CRIS Tools is not running it will launch it.
 
 ```
-cris_tools_proxy.exe <command>
+cris_tools_proxy.exe [command]
 ```
 
 `<command>` is the name of a registered automation in CRIS Tools (for example
 `load_event_history` or `launch_maxims`). The proxy sends `run/<token>/<command>`
-to the app's NNG listener on `tcp://localhost:<port>` and prints the response,
-where `<token>` is read from the app's per-run `ipc.token` (see below). If no
-token is found it falls back to the legacy `run/<command>` form.
+to the app's NNG listener on `tcp://<host>:<port>` (default
+`tcp://127.0.0.1:5555`) and prints the response, where `<token>` is read from
+the app's per-run `ipc.token` (see below). If no token is found it falls back to
+the legacy `run/<command>` form.
+
+Run without a command to make sure CRIS Tools is running: if it is not, the
+proxy launches it without asking. Use this for a desktop shortcut or a voice
+command that simply opens CRIS Tools.
 
 ## Authentication
 
