@@ -1,6 +1,6 @@
 [package]
 name = "cris_tools_proxy"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [dependencies]
@@ -10,6 +10,9 @@ edition = "2021"
 nng = "1.0.1"
 rfd = "0.14.1"
 toml = "0.8.13"
+# Edit the per-user preferences file in place so saving the launch preference
+# keeps any comments or other settings the user added.
+toml_edit = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 # Unpack the versioned build zip into the local run cache.
 zip = "2"

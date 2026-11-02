@@ -35,10 +35,14 @@ directory, so it works no matter what CWD the proxy is launched from.
 | Key | Meaning |
 | --- | --- |
 | `port` | Port the app's command listener binds. Must match `[commands].port` in the app's `config/global.toml`. |
+| `host` | Host/address of the command listener. Defaults to `127.0.0.1`. |
+| `timeout_ms` | How long to wait for a command response, in milliseconds. Default `30000`. |
 | `cris_tools_path` | Fallback executable used when no published build is found. |
 | `app_root` | Optional directory containing `app/current.txt` and the build zips. Defaults to the config file's directory; relative paths resolve against it. |
 | `require_token` | When true, refuse to send if the app's IPC token file is missing instead of using the legacy protocol. Default `false`. |
 | `ipc_token_file` | Optional override for the app's `ipc.token` path. Defaults to `%LOCALAPPDATA%\cris-tools\ipc.token`. |
+| `launch_without_prompt` | Default for launching CRIS Tools automatically instead of asking. A user's saved choice in the per-user preferences file overrides this. |
+| `preferences_file` | Optional override for the per-user preferences file. Defaults to `%LOCALAPPDATA%\cris-tools\prefs.toml`. |
 
 ## Launching a published build
 
@@ -49,3 +53,11 @@ cache (`%LOCALAPPDATA%\cris-tools\run\<version>\`), and launches it from there
 with `CRIS_TOOLS_DATA_DIR` pointed back at the share so `config/`, `plugins/`
 and logs stay shared. Running from a local cache keeps startup fast and avoids
 per-launch AV extraction. Cancelling the progress dialog aborts the launch.
+
+If the user picks "always launch", the proxy saves `launch_without_prompt = true`
+in a per-user preferences file (`%LOCALAPPDATA%\cris-tools\prefs.toml` by
+default) and skips the prompt from then on for that user. Deleting that file
+restores the prompt. After launching, the proxy waits for the app to become
+ready and then sends the original command, so the user does not have to repeat
+it. If the configured executable does not exist, the proxy shows an error
+dialog instead of failing silently.

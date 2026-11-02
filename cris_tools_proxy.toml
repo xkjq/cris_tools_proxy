@@ -7,6 +7,14 @@
 # the app's config/global.toml on the deployment share.
 port = 5555
 
+# Host/address of the command listener. Defaults to IPv4 loopback so a
+# `localhost` lookup that prefers IPv6 cannot hide an IPv4-only listener.
+# host = "127.0.0.1"
+
+# How long to wait for the app to accept a command and reply, in milliseconds.
+# Increase this if an automation legitimately takes longer than 30 seconds.
+# timeout_ms = 30000
+
 # Fallback executable used when no published build is found in `app/`
 # (legacy layout / first run before a build is published).
 cris_tools_path = "path/to/cris-tools"
@@ -24,3 +32,11 @@ cris_tools_path = "path/to/cris-tools"
 # Override the location of the app's per-run token file. Defaults to
 # %LOCALAPPDATA%\cris-tools\ipc.token.
 # ipc_token_file = "C:\\Users\\me\\AppData\\Local\\cris-tools\\ipc.token"
+
+# Default for launching CRIS Tools automatically when it is not running.
+# Users' saved choices in their per-user preferences file override this.
+# launch_without_prompt = false
+
+# Override the location of the per-user preferences file that stores whether
+# to launch without asking. Defaults to %LOCALAPPDATA%\cris-tools\prefs.toml.
+# preferences_file = "C:\\Users\\me\\AppData\\Local\\cris-tools\\prefs.toml"
