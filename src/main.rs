@@ -3,10 +3,13 @@ use nng::{Error, Protocol, Socket};
 use rfd::{MessageDialog, MessageLevel};
 use serde::Deserialize;
 use std::fs::{self, OpenOptions, TryLockError};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 #[derive(Debug, Deserialize)]
 struct Settings {
@@ -77,6 +80,10 @@ const EXE_SUBDIR: &str = "cris_tools";
 const EXE_NAME: &str = "cris_tools.exe";
 /// Settings file name, resolved next to the executable (see `settings_path`).
 const SETTINGS_FILE: &str = "cris_tools_proxy.toml";
+/// Persistent proxy log, written under the per-user profile so Dragon-launched
+/// processes leave a diagnosable trace. Override with `CRIS_TOOLS_PROXY_LOG`.
+const LOG_FILE_NAME: &str = "proxy.log";
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Default NNG send/receive timeout. Automations can take a while, but a wedged
 /// listener must not block the REQ socket (and therefore Dragon) forever.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -108,6 +115,50 @@ fn settings_path() -> PathBuf {
         return beside_exe;
     }
     PathBuf::from(SETTINGS_FILE)
+}
+
+/// Default persistent log path. Python's app log lives in the shared log
+/// directory, but the proxy is commonly launched by Dragon with no console, so
+/// it writes to the current user's profile instead.
+fn default_log_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("CRIS_TOOLS_PROXY_LOG") {
+        return PathBuf::from(path);
+    }
+    for variable in ["LOCALAPPDATA", "XDG_STATE_HOME"] {
+        if let Some(base) = std::env::var_os(variable) {
+            return PathBuf::from(base).join("cris-tools").join(LOG_FILE_NAME);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("cris-tools")
+            .join(LOG_FILE_NAME);
+    }
+    std::env::temp_dir().join(LOG_FILE_NAME)
+}
+
+/// Append one diagnostic line without letting a logging failure break the
+/// command. The log rotates once at 2 MB, keeping one previous file.
+fn log_line(level: &str, message: &str) {
+    let path = default_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(metadata) = fs::metadata(&path) {
+        if metadata.len() > LOG_MAX_BYTES {
+            let previous = path.with_extension("log.1");
+            let _ = fs::remove_file(&previous);
+            let _ = fs::rename(&path, previous);
+        }
+    }
+    let timestamp = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "unknown-time".to_string());
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{timestamp}] {level:<5} {message}");
+    }
 }
 
 fn load_settings(path: &Path) -> Result<Settings, Box<dyn std::error::Error>> {
@@ -690,10 +741,21 @@ fn launch_cris_tools(settings: &Settings, settings_dir: &Path) -> std::io::Resul
     match ensure_cached_build(&root)? {
         Some(exe) => {
             println!("Launching cached build: {}", exe.display());
+            log_line(
+                "INFO",
+                &format!("Launching cached build: {}", exe.display()),
+            );
             spawn(&exe, Some(&root), Some(&root))
         }
         None => {
             println!("Launching: {}", settings.cris_tools_path.display());
+            log_line(
+                "INFO",
+                &format!(
+                    "Launching configured executable: {}",
+                    settings.cris_tools_path.display()
+                ),
+            );
             spawn(&settings.cris_tools_path, None, None)
         }
     }
@@ -703,6 +765,7 @@ fn launch_cris_tools(settings: &Settings, settings_dir: &Path) -> std::io::Resul
 /// visible console, so logging alone is not enough.
 fn show_error(title: &str, description: &str) {
     eprintln!("{title}: {description}");
+    log_line("ERROR", &format!("{title}: {description}"));
     MessageDialog::new()
         .set_level(MessageLevel::Error)
         .set_title(title)
@@ -715,6 +778,7 @@ fn show_error(title: &str, description: &str) {
 /// chose to always launch. Returns true when the caller should launch.
 fn confirm_launch(settings: &Settings, settings_dir: &Path) -> bool {
     if launch_without_prompt(settings, settings_dir) {
+        log_line("INFO", "Launching without prompting (user preference)");
         return true;
     }
 
@@ -725,6 +789,7 @@ fn confirm_launch(settings: &Settings, settings_dir: &Path) -> bool {
         .show();
 
     if choice != rfd::MessageDialogResult::Yes {
+        log_line("INFO", "User declined to launch CRIS Tools");
         return false;
     }
 
@@ -747,6 +812,11 @@ fn confirm_launch(settings: &Settings, settings_dir: &Path) -> bool {
                     path.display()
                 ),
             );
+        } else {
+            log_line(
+                "INFO",
+                &format!("Saved launch preference to {}", path.display()),
+            );
         }
     }
 
@@ -759,10 +829,12 @@ fn launch_and_report(settings: &Settings, settings_dir: &Path, config_path: &Pat
     match launch_cris_tools(settings, settings_dir) {
         Ok(_) => {
             println!("CRIS Tools launched successfully");
+            log_line("INFO", "CRIS Tools process started");
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
             println!("CRIS Tools launch cancelled");
+            log_line("INFO", "CRIS Tools launch cancelled");
             false
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -845,11 +917,31 @@ fn launch_once(
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        log_line("PANIC", &format!("{info}"));
+    }));
+    log_line(
+        "INFO",
+        &format!(
+            "cris_tools_proxy {} starting (log: {})",
+            env!("CARGO_PKG_VERSION"),
+            default_log_path().display()
+        ),
+    );
+
     // With no command the proxy's only useful action is to make sure CRIS
     // Tools is running, so launch it without prompting in that case.
     let command = std::env::args().nth(1).filter(|arg| !arg.is_empty());
+    match &command {
+        Some(command) => log_line("INFO", &format!("Requested command: {command}")),
+        None => log_line(
+            "INFO",
+            "No command supplied; ensuring CRIS Tools is running",
+        ),
+    }
 
     let config_path = settings_path();
+    log_line("INFO", &format!("Settings path: {}", config_path.display()));
     let settings_dir = config_path
         .parent()
         .map(Path::to_path_buf)
@@ -865,6 +957,28 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let token_path = ipc_token_path(&settings, &settings_dir);
+    log_line(
+        "INFO",
+        &format!(
+            "Settings: host={}, port={}, require_token={}, timeout_ms={}, app_root={:?}",
+            settings.host,
+            settings.port,
+            settings.require_token,
+            settings.timeout_ms,
+            settings.app_root
+        ),
+    );
+    log_line(
+        "INFO",
+        &format!(
+            "IPC token path: {}",
+            token_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unavailable>".to_string())
+        ),
+    );
 
     // Create a socket of type REQ (request)
     let socket = match Socket::new(Protocol::Req0) {
@@ -890,13 +1004,19 @@ fn main() {
     match connect_with_retry(&socket, &settings) {
         Ok(()) => {
             println!("Connected to server");
+            log_line("INFO", "Connected to CRIS Tools listener");
             if launch_only {
                 println!("CRIS Tools is already running");
+                log_line("INFO", "CRIS Tools is already running");
                 return;
             }
         }
         Err(e) => {
             println!("Failed to connect to server: {:?}", e);
+            log_line(
+                "WARN",
+                &format!("Could not connect to CRIS Tools listener: {e:?}"),
+            );
 
             // Serialise launches so simultaneous commands cannot start
             // several CRIS Tools instances.
@@ -907,9 +1027,11 @@ fn main() {
                 &config_path,
                 !launch_only,
             ) {
+                log_line("ERROR", "Launch/wait failed; exiting");
                 std::process::exit(1);
             }
             println!("CRIS Tools is ready");
+            log_line("INFO", "CRIS Tools is ready");
 
             if launch_only {
                 return;
@@ -926,16 +1048,34 @@ fn main() {
     } else {
         read_ipc_token(&settings, &settings_dir)
     };
-    if settings.require_token && token.is_none() {
+    if let Some(token) = &token {
+        log_line(
+            "INFO",
+            &format!("IPC token read successfully ({} characters)", token.len()),
+        );
+    } else if settings.require_token {
+        log_line("ERROR", "IPC token not found; command not sent");
         show_error(
             "CRIS Tools IPC token not found",
             "CRIS Tools is running but has not published its IPC token. Is it fully started?",
         );
         std::process::exit(1);
+    } else {
+        log_line(
+            "WARN",
+            "IPC token not found; sending legacy untokened command",
+        );
     }
 
     // Send the argument to the server
     let message = command_message(token.as_deref(), &arg);
+    log_line(
+        "INFO",
+        &format!(
+            "Sending {} command: {arg}",
+            if token.is_some() { "tokened" } else { "legacy" }
+        ),
+    );
     if let Err(e) = socket.send(message.as_bytes()) {
         show_error(
             "Failed to send command",
@@ -947,7 +1087,16 @@ fn main() {
     // Receive the response from the server
     match socket.recv() {
         Ok(response) => match String::from_utf8(response.to_vec()) {
-            Ok(response) => println!("Response: {}", response),
+            Ok(response) => {
+                log_line(
+                    "INFO",
+                    &format!(
+                        "Response: {}",
+                        response.chars().take(200).collect::<String>()
+                    ),
+                );
+                println!("Response: {}", response)
+            }
             Err(_) => {
                 show_error(
                     "Invalid response",

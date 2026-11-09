@@ -14,6 +14,8 @@ toml = "0.8.13"
 # keeps any comments or other settings the user added.
 toml_edit = "0.22"
 serde = { version = "1.0", features = ["derive"] }
+# Human-readable timestamps in the persistent proxy log.
+time = { version = "0.3", features = ["formatting"] }
 # Unpack the versioned build zip into the local run cache.
 zip = "2"
 
