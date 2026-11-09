@@ -25,9 +25,10 @@ cris_tools_path = "path/to/cris-tools"
 # app_root = "."
 
 # Refuse to send a command when the app's IPC token cannot be found, instead of
-# falling back to the legacy `run/<command>` protocol. Leave false during the
-# rollout; set true once every deployed CRIS Tools build supports tokens.
-# require_token = false
+# falling back to the legacy `run/<command>` protocol. Enabled by default
+# because deployed CRIS Tools builds reject untokened commands. Set false only
+# during a controlled mixed-version rollout.
+require_token = true
 
 # Override the location of the app's per-run token file. Defaults to
 # %LOCALAPPDATA%\cris-tools\ipc.token.

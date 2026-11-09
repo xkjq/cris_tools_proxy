@@ -29,8 +29,10 @@ struct Settings {
     app_root: Option<PathBuf>,
     /// Refuse to send a command when the app's IPC token cannot be found,
     /// instead of falling back to the pre-token `run/<command>` protocol.
-    /// Enable once every deployed CRIS Tools sends/accepts tokens.
-    #[serde(default)]
+    /// Enabled by default because current CRIS Tools builds reject untokened
+    /// commands. Set `require_token = false` only during a mixed-version
+    /// rollout.
+    #[serde(default = "default_require_token")]
     require_token: bool,
     /// Override the location of the app's `ipc.token`. Defaults to
     /// `%LOCALAPPDATA%\cris-tools\ipc.token` (`$XDG_RUNTIME_DIR` on Linux).
@@ -52,6 +54,10 @@ fn default_host() -> String {
 
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+fn default_require_token() -> bool {
+    true
 }
 
 /// Per-user preferences saved by the proxy. Separate from the shared config so
@@ -313,8 +319,15 @@ fn connect_with_retry(socket: &Socket, settings: &Settings) -> Result<(), Error>
 }
 
 /// After launching, wait for the listener (and, when required, the IPC token)
-/// to become ready so the original command can still be delivered.
-fn wait_for_app(socket: &Socket, settings: &Settings, settings_dir: &Path) -> Result<(), String> {
+/// to become ready so the original command can still be delivered. When
+/// `previous_token` is provided, a stale token left by a crashed run is ignored
+/// until the newly launched app publishes a different one.
+fn wait_for_app(
+    socket: &Socket,
+    settings: &Settings,
+    settings_dir: &Path,
+    previous_token: Option<&str>,
+) -> Result<(), String> {
     let deadline = Instant::now() + APP_START_TIMEOUT;
     loop {
         match connect(socket, settings) {
@@ -334,7 +347,7 @@ fn wait_for_app(socket: &Socket, settings: &Settings, settings_dir: &Path) -> Re
     // The token is written after the listener starts, so it can lag slightly.
     if settings.require_token {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if wait_for_token(settings, settings_dir, remaining).is_none() {
+        if wait_for_token(settings, settings_dir, remaining, previous_token).is_none() {
             return Err(format!(
                 "CRIS Tools started, but its IPC token did not appear within {} seconds.",
                 APP_START_TIMEOUT.as_secs()
@@ -363,25 +376,39 @@ fn default_ipc_token_path() -> Option<PathBuf> {
     })
 }
 
+/// Resolve the IPC token path, honouring an optional config override.
+fn ipc_token_path(settings: &Settings, settings_dir: &Path) -> Option<PathBuf> {
+    match &settings.ipc_token_file {
+        Some(path) if path.is_absolute() => Some(path.clone()),
+        Some(path) => Some(settings_dir.join(path)),
+        None => default_ipc_token_path(),
+    }
+}
+
 /// Read the token CRIS Tools published for this run, if any.
 fn read_ipc_token(settings: &Settings, settings_dir: &Path) -> Option<String> {
-    let path = match &settings.ipc_token_file {
-        Some(path) if path.is_absolute() => path.clone(),
-        Some(path) => settings_dir.join(path),
-        None => default_ipc_token_path()?,
-    };
+    let path = ipc_token_path(settings, settings_dir)?;
     let token = fs::read_to_string(path).ok()?;
     let token = token.trim().to_string();
     (!token.is_empty()).then_some(token)
 }
 
 /// Poll for the IPC token for a short window. The app writes it around the time
-/// the listener starts, so it can lag a connection attempt slightly.
-fn wait_for_token(settings: &Settings, settings_dir: &Path, timeout: Duration) -> Option<String> {
+/// the listener starts, so it can lag a connection attempt slightly. A token
+/// equal to `previous_token` is treated as stale so a crashed run's file cannot
+/// be mistaken for the newly launched app's token.
+fn wait_for_token(
+    settings: &Settings,
+    settings_dir: &Path,
+    timeout: Duration,
+    previous_token: Option<&str>,
+) -> Option<String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(token) = read_ipc_token(settings, settings_dir) {
-            return Some(token);
+            if previous_token != Some(token.as_str()) {
+                return Some(token);
+            }
         }
         if Instant::now() >= deadline {
             return None;
@@ -772,9 +799,10 @@ fn launch_once(
         Ok(Some(lock)) => lock,
         Ok(None) => {
             // Another proxy process is already launching it. Wait for that
-            // launch instead of starting a second instance.
+            // launch instead of starting a second instance. We cannot know the
+            // previous token safely here, so accept the current one.
             println!("Another CRIS Tools launch is in progress; waiting...");
-            return match wait_for_app(socket, settings, settings_dir) {
+            return match wait_for_app(socket, settings, settings_dir, None) {
                 Ok(()) => true,
                 Err(message) => {
                     show_error("CRIS Tools did not start", &message);
@@ -799,11 +827,15 @@ fn launch_once(
         return false;
     }
 
+    // A crashed run can leave its token behind. Remember it so the wait below
+    // does not accept the stale file before the new process writes its token.
+    let previous_token = read_ipc_token(settings, settings_dir);
+
     if !launch_and_report(settings, settings_dir, config_path) {
         return false;
     }
 
-    match wait_for_app(socket, settings, settings_dir) {
+    match wait_for_app(socket, settings, settings_dir, previous_token.as_deref()) {
         Ok(()) => true,
         Err(message) => {
             show_error("CRIS Tools did not start", &message);
@@ -890,7 +922,7 @@ fn main() {
     // Authenticate with the token CRIS Tools wrote for this run. If it is
     // missing and the config requires one, never fall back to the legacy form.
     let token = if settings.require_token {
-        wait_for_token(&settings, &settings_dir, TOKEN_WAIT)
+        wait_for_token(&settings, &settings_dir, TOKEN_WAIT, None)
     } else {
         read_ipc_token(&settings, &settings_dir)
     };
@@ -1122,11 +1154,61 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_token_ignores_previous_value() {
+        let dir =
+            std::env::temp_dir().join(format!("proxy-token-wait-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ipc.token");
+        fs::write(&path, "old-token\n").unwrap();
+
+        let settings = Settings {
+            cris_tools_path: PathBuf::from("missing"),
+            port: 5555,
+            host: default_host(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            app_root: None,
+            require_token: true,
+            ipc_token_file: Some(path.clone()),
+            launch_without_prompt: false,
+            preferences_file: None,
+        };
+
+        assert_eq!(
+            wait_for_token(
+                &settings,
+                Path::new("."),
+                Duration::from_millis(20),
+                Some("old-token"),
+            ),
+            None
+        );
+        assert_eq!(
+            wait_for_token(&settings, Path::new("."), Duration::from_millis(20), None,).as_deref(),
+            Some("old-token")
+        );
+
+        fs::write(&path, "new-token\n").unwrap();
+        assert_eq!(
+            wait_for_token(
+                &settings,
+                Path::new("."),
+                Duration::from_millis(20),
+                Some("old-token"),
+            )
+            .as_deref(),
+            Some("new-token")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn settings_default_to_localhost_and_thirty_seconds() {
         let settings: Settings =
             toml::from_str("cris_tools_path = \"cris_tools.exe\"\nport = 5555\n").unwrap();
         assert_eq!(settings.host, "localhost");
         assert_eq!(settings.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert!(settings.require_token);
     }
 
     #[test]

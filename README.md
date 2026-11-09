@@ -11,8 +11,9 @@ cris_tools_proxy.exe [command]
 `load_event_history` or `launch_maxims`). The proxy sends `run/<token>/<command>`
 to the app's NNG listener on `tcp://<host>:<port>` (default
 `tcp://localhost:5555`) and prints the response, where `<token>` is read from
-the app's per-run `ipc.token` (see below). If no token is found it falls back to
-the legacy `run/<command>` form.
+the app's per-run `ipc.token` (see below). Token authentication is required by
+default; set `require_token = false` only for a mixed-version rollout where the
+app still accepts the legacy `run/<command>` form.
 
 Run without a command to make sure CRIS Tools is running: if it is not, the
 proxy launches it without asking. Use this for a desktop shortcut or a voice
@@ -27,11 +28,10 @@ and rejects any command that does not present it. This stops other users or
 sessions on a shared workstation from driving clinical automations. The proxy
 reads the same file and includes the token on every request.
 
-Rollout: both sides accept the legacy form until
-`[commands] require_token = true` is set in the app's `config/global.toml`
-(and `require_token = true` in this proxy's config). Set the app's flag once
-every deployed proxy sends tokens, and the proxy's flag once every deployed app
-accepts them.
+`require_token` defaults to `true`, so the proxy refuses to send if the token
+file is missing rather than silently falling back to the rejected legacy form.
+Set it to `false` only while rolling out a newer proxy against older app builds
+that still accept `run/<command>`; once the app requires tokens, leave it on.
 
 ## Configuration (`cris_tools_proxy.toml`)
 
@@ -45,7 +45,7 @@ directory, so it works no matter what CWD the proxy is launched from.
 | `timeout_ms` | How long to wait for a command response, in milliseconds. Default `30000`. |
 | `cris_tools_path` | Fallback executable used when no published build is found. |
 | `app_root` | Optional directory containing `app/current.txt` and the build zips. Defaults to the config file's directory; relative paths resolve against it. |
-| `require_token` | When true, refuse to send if the app's IPC token file is missing instead of using the legacy protocol. Default `false`. |
+| `require_token` | When true, refuse to send if the app's IPC token file is missing instead of using the legacy protocol. Default `true`. Set false only for a mixed-version rollout. |
 | `ipc_token_file` | Optional override for the app's `ipc.token` path. Defaults to `%LOCALAPPDATA%\cris-tools\ipc.token`. |
 | `launch_without_prompt` | Default for launching CRIS Tools automatically instead of asking. A user's saved choice in the per-user preferences file overrides this. |
 | `preferences_file` | Optional override for the per-user preferences file. Defaults to `%LOCALAPPDATA%\cris-tools\prefs.toml`. |
