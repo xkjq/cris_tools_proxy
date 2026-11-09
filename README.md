@@ -10,7 +10,7 @@ cris_tools_proxy.exe [command]
 `<command>` is the name of a registered automation in CRIS Tools (for example
 `load_event_history` or `launch_maxims`). The proxy sends `run/<token>/<command>`
 to the app's NNG listener on `tcp://<host>:<port>` (default
-`tcp://localhost:5555`) and prints the response, where `<token>` is read from
+`tcp://127.0.0.1:5555`) and prints the response, where `<token>` is read from
 the app's per-run `ipc.token` (see below). Token authentication is required by
 default; set `require_token = false` only for a mixed-version rollout where the
 app still accepts the legacy `run/<command>` form.
@@ -41,7 +41,7 @@ directory, so it works no matter what CWD the proxy is launched from.
 | Key | Meaning |
 | --- | --- |
 | `port` | Port the app's command listener binds. Must match `[commands].port` in the app's `config/global.toml`. |
-| `host` | Host/address of the command listener. Defaults to `localhost`. |
+| `host` | Host/address of the command listener. Defaults to `127.0.0.1` to match the app's IPv4 bind. |
 | `timeout_ms` | How long to wait for a command response, in milliseconds. Default `30000`. |
 | `cris_tools_path` | Fallback executable used when no published build is found. |
 | `app_root` | Optional directory containing `app/current.txt` and the build zips. Defaults to the config file's directory; relative paths resolve against it. |

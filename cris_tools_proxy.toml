@@ -7,9 +7,9 @@
 # the app's config/global.toml on the deployment share.
 port = 5555
 
-# Host/address of the command listener. Defaults to `localhost` to match the
-# app's own bind address. Set this if the app listens on a different host.
-# host = "localhost"
+# Host/address of the command listener. Defaults to IPv4 loopback to match the
+# app's own 127.0.0.1 bind. Set this if the app listens on a different host.
+# host = "127.0.0.1"
 
 # How long to wait for the app to accept a command and reply, in milliseconds.
 # Increase this if an automation legitimately takes longer than 30 seconds.

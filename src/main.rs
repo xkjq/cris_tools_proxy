@@ -17,8 +17,9 @@ struct Settings {
     /// Port the app listens on. Typed as a number so `tcp://{host}:{port}` is
     /// always a valid URL (a quoted TOML string used to render with quotes).
     port: u16,
-    /// Host/address of the app's listener. Defaults to `localhost` to match
-    /// the app's own bind address; override this if the app listens elsewhere.
+    /// Host/address of the app's listener. Defaults to IPv4 loopback to match
+    /// the app's own 127.0.0.1 bind; `localhost` can resolve to IPv6 first on
+    /// Windows and prevent the NNG connection.
     #[serde(default = "default_host")]
     host: String,
     /// How long to wait for the app to accept a command and reply, in
@@ -52,7 +53,7 @@ struct Settings {
 }
 
 fn default_host() -> String {
-    "localhost".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_timeout_ms() -> u64 {
@@ -1001,6 +1002,13 @@ fn main() {
     // Connect to the NNG server, allowing a short window for an app that is
     // already starting up before deciding it is not running.
     let launch_only = command.is_none();
+    log_line(
+        "INFO",
+        &format!(
+            "Connecting to {}",
+            socket_url(&settings.host, settings.port)
+        ),
+    );
     match connect_with_retry(&socket, &settings) {
         Ok(()) => {
             println!("Connected to server");
@@ -1266,8 +1274,8 @@ mod tests {
     }
 
     #[test]
-    fn socket_url_uses_localhost_by_default() {
-        assert_eq!(socket_url(&default_host(), 5555), "tcp://localhost:5555");
+    fn socket_url_uses_ipv4_loopback_by_default() {
+        assert_eq!(socket_url(&default_host(), 5555), "tcp://127.0.0.1:5555");
     }
 
     #[test]
@@ -1352,10 +1360,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_localhost_and_thirty_seconds() {
+    fn settings_default_to_ipv4_and_thirty_seconds() {
         let settings: Settings =
             toml::from_str("cris_tools_path = \"cris_tools.exe\"\nport = 5555\n").unwrap();
-        assert_eq!(settings.host, "localhost");
+        assert_eq!(settings.host, "127.0.0.1");
         assert_eq!(settings.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(settings.require_token);
     }
