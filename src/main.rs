@@ -13,7 +13,10 @@ use time::OffsetDateTime;
 
 #[derive(Debug, Deserialize)]
 struct Settings {
-    cris_tools_path: PathBuf,
+    /// Optional legacy fallback executable used only when no published build
+    /// is available under ``app_root``.
+    #[serde(default)]
+    cris_tools_path: Option<PathBuf>,
     /// Port the app listens on. Typed as a number so `tcp://{host}:{port}` is
     /// always a valid URL (a quoted TOML string used to render with quotes).
     port: u16,
@@ -749,15 +752,18 @@ fn launch_cris_tools(settings: &Settings, settings_dir: &Path) -> std::io::Resul
             spawn(&exe, Some(&root), Some(&root))
         }
         None => {
-            println!("Launching: {}", settings.cris_tools_path.display());
+            let Some(path) = &settings.cris_tools_path else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no published build and no cris_tools_path fallback configured",
+                ));
+            };
+            println!("Launching: {}", path.display());
             log_line(
                 "INFO",
-                &format!(
-                    "Launching configured executable: {}",
-                    settings.cris_tools_path.display()
-                ),
+                &format!("Launching configured executable: {}", path.display()),
             );
-            spawn(&settings.cris_tools_path, None, None)
+            spawn(path, None, None)
         }
     }
 }
@@ -1164,7 +1170,7 @@ mod tests {
     #[test]
     fn missing_token_file_reads_none() {
         let settings = Settings {
-            cris_tools_path: PathBuf::from("missing"),
+            cris_tools_path: Some(PathBuf::from("missing")),
             port: 5555,
             host: default_host(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -1185,7 +1191,7 @@ mod tests {
         fs::write(&path, "  deadbeef\n").unwrap();
 
         let settings = Settings {
-            cris_tools_path: PathBuf::from("missing"),
+            cris_tools_path: Some(PathBuf::from("missing")),
             port: 5555,
             host: default_host(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -1247,7 +1253,7 @@ mod tests {
         let prefs_path = dir.join("prefs.toml");
 
         let mut settings = Settings {
-            cris_tools_path: PathBuf::from("missing"),
+            cris_tools_path: Some(PathBuf::from("missing")),
             port: 5555,
             host: default_host(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -1319,7 +1325,7 @@ mod tests {
         fs::write(&path, "old-token\n").unwrap();
 
         let settings = Settings {
-            cris_tools_path: PathBuf::from("missing"),
+            cris_tools_path: Some(PathBuf::from("missing")),
             port: 5555,
             host: default_host(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -1366,6 +1372,13 @@ mod tests {
         assert_eq!(settings.host, "127.0.0.1");
         assert_eq!(settings.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(settings.require_token);
+        assert_eq!(
+            settings.cris_tools_path,
+            Some(PathBuf::from("cris_tools.exe"))
+        );
+
+        let without_fallback: Settings = toml::from_str("port = 5555\n").unwrap();
+        assert_eq!(without_fallback.cris_tools_path, None);
     }
 
     #[test]

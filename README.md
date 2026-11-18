@@ -43,7 +43,7 @@ directory, so it works no matter what CWD the proxy is launched from.
 | `port` | Port the app's command listener binds. Must match `[commands].port` in the app's `config/global.toml`. |
 | `host` | Host/address of the command listener. Defaults to `127.0.0.1` to match the app's IPv4 bind. |
 | `timeout_ms` | How long to wait for a command response, in milliseconds. Default `30000`. |
-| `cris_tools_path` | Fallback executable used when no published build is found. |
+| `cris_tools_path` | Optional fallback executable used only when no published build is found. |
 | `app_root` | Optional directory containing `app/current.txt` and the build zips. Defaults to the config file's directory; relative paths resolve against it. |
 | `require_token` | When true, refuse to send if the app's IPC token file is missing instead of using the legacy protocol. Default `true`. Set false only for a mixed-version rollout. |
 | `ipc_token_file` | Optional override for the app's `ipc.token` path. Defaults to `%LOCALAPPDATA%\cris-tools\ipc.token`. |

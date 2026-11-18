@@ -15,9 +15,9 @@ port = 5555
 # Increase this if an automation legitimately takes longer than 30 seconds.
 # timeout_ms = 30000
 
-# Fallback executable used when no published build is found in `app/`
-# (legacy layout / first run before a build is published).
-cris_tools_path = "path/to/cris-tools"
+# Optional fallback executable used only when no published build is found
+# in `app/` (legacy layout / first run before a build is published).
+# cris_tools_path = "path/to/cris-tools"
 
 # Directory holding `app/current.txt` and the versioned build zips.
 # Optional: defaults to the directory containing this config file (the
