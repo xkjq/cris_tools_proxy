@@ -33,6 +33,31 @@ file is missing rather than silently falling back to the rejected legacy form.
 Set it to `false` only while rolling out a newer proxy against older app builds
 that still accept `run/<command>`; once the app requires tokens, leave it on.
 
+## Command allowlist and refusal responses
+
+CRIS Tools can optionally restrict which automations the listener will run with
+`[commands] allowed` in the deployment's `config/global.toml`:
+
+```toml
+[commands]
+allowed = ["load_event_history", "launch_maxims"]
+```
+
+The proxy does not need any allowlist configuration of its own; it simply sends
+the requested command. If the app refuses it, the proxy shows a clear dialog and
+exits non-zero instead of treating the refusal as success:
+
+| Response | Meaning |
+| --- | --- |
+| `received` | Automation accepted. |
+| `forbidden` | The command is not in `[commands] allowed` (or is not a registered automation while an allowlist is active); the dialog names the command and shows the config key to update. |
+| `rate limited` | Too many commands arrived too quickly; wait and retry. |
+| `invalid` | The IPC token was stale or missing; wait for startup or restart CRIS Tools. |
+| `invalid function` | No automation with that name is registered; check the command name and loaded plugins. |
+
+Unknown response values are printed as before so a future app response does not
+break older proxies.
+
 ## Configuration (`cris_tools_proxy.toml`)
 
 The config is looked up **next to the executable** first, then in the working

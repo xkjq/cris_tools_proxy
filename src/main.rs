@@ -768,6 +768,48 @@ fn launch_cris_tools(settings: &Settings, settings_dir: &Path) -> std::io::Resul
     }
 }
 
+/// Map the app's short protocol responses to a user-facing error.
+///
+/// A successful request returns ``received``. The other values are deliberate
+/// refusals, so the proxy should explain them instead of treating every reply
+/// as success. Unknown values remain informational for forward compatibility.
+fn response_error(response: &str, command: &str) -> Option<(&'static str, String)> {
+    match response.trim() {
+        "forbidden" => Some((
+            "Command not permitted",
+            format!(
+                "CRIS Tools refused the '{command}' command. It is either not \
+                 registered as an automation or not in the listener allowlist.\
+                 \n\nAdd it to [commands] allowed in config/global.toml:\n\n\
+                 allowed = [\"{command}\"]\n\n\
+                 and check that the command name matches a loaded automation."
+            ),
+        )),
+        "rate limited" => Some((
+            "CRIS Tools is busy",
+            "CRIS Tools is receiving commands too quickly and dropped this one.\n\n\
+             Wait a few seconds, then try the command again."
+                .to_string(),
+        )),
+        "invalid" => Some((
+            "CRIS Tools rejected the command",
+            "The command was not authenticated. The IPC token may be stale or \
+             belong to another CRIS Tools session.\n\nWait for CRIS Tools to \
+             finish starting, then try again. Restart CRIS Tools if it persists."
+                .to_string(),
+        )),
+        "invalid function" => Some((
+            "Unknown CRIS Tools command",
+            format!(
+                "CRIS Tools does not have an automation named '{command}'.\n\n\
+                 Check the command name and make sure the plugin that registers \
+                 it is loaded."
+            ),
+        )),
+        _ => None,
+    }
+}
+
 /// Show an error to the user. The proxy is normally started by Dragon with no
 /// visible console, so logging alone is not enough.
 fn show_error(title: &str, description: &str) {
@@ -1109,6 +1151,10 @@ fn main() {
                         response.chars().take(200).collect::<String>()
                     ),
                 );
+                if let Some((title, description)) = response_error(&response, &arg) {
+                    show_error(title, &description);
+                    std::process::exit(1);
+                }
                 println!("Response: {}", response)
             }
             Err(_) => {
@@ -1379,6 +1425,36 @@ mod tests {
 
         let without_fallback: Settings = toml::from_str("port = 5555\n").unwrap();
         assert_eq!(without_fallback.cris_tools_path, None);
+    }
+
+    #[test]
+    fn forbidden_response_has_a_clear_message() {
+        let (title, message) = response_error("forbidden", "load_event_history").unwrap();
+        assert_eq!(title, "Command not permitted");
+        assert!(message.contains("load_event_history"));
+        assert!(message.contains("[commands] allowed"));
+    }
+
+    #[test]
+    fn malformed_and_unknown_responses_are_not_errors() {
+        assert!(response_error("received", "load_event").is_none());
+        assert!(response_error("some future reply", "load_event").is_none());
+    }
+
+    #[test]
+    fn other_refusals_are_explained() {
+        assert_eq!(
+            response_error("rate limited", "load_event").unwrap().0,
+            "CRIS Tools is busy"
+        );
+        assert_eq!(
+            response_error("invalid", "load_event").unwrap().0,
+            "CRIS Tools rejected the command"
+        );
+        assert_eq!(
+            response_error("invalid function", "load_event").unwrap().0,
+            "Unknown CRIS Tools command"
+        );
     }
 
     #[test]
