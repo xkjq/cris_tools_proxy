@@ -14,9 +14,11 @@ cris_tools_proxy.exe [command]
 ```
 
 `<command>` is the name of a registered automation in CRIS Tools (for example
-`load_event_history` or `launch_maxims`). The proxy sends `run/<token>/<command>`
-to the app's NNG listener on `tcp://<host>:<port>` (default
-`tcp://127.0.0.1:5555`) and prints the response, where `<token>` is read from
+`load_event_history` or `launch_maxims`). Command names are validated before
+anything is sent: empty names, whitespace/control characters, `/`, `\`, and
+names longer than 128 bytes are rejected with a dialog. The proxy sends
+`run/<token>/<command>` to the app's NNG listener on `tcp://<host>:<port>`
+(default `tcp://127.0.0.1:5555`) and prints the response, where `<token>` is read from
 the app's per-run `ipc.token` (see below). Token authentication is required by
 default; set `require_token = false` only for a mixed-version rollout where the
 app still accepts the legacy `run/<command>` form.
@@ -60,7 +62,7 @@ exits non-zero instead of treating the refusal as success:
 | --- | --- |
 | `received` | Automation accepted. |
 | `forbidden` | The command is not in `[commands] allowed` (or is not a registered automation while an allowlist is active); the dialog names the command and shows the config key to update. |
-| `rate limited` | Too many commands arrived too quickly; wait and retry. |
+| `rate limited` | Automatically retried once after one second; if still limited, the proxy reports that CRIS Tools is busy. |
 | `invalid` | The IPC token was stale or missing; wait for startup or restart CRIS Tools. |
 | `invalid function` | No automation with that name is registered; check the command name and loaded plugins. |
 
@@ -106,3 +108,19 @@ restores the prompt. After launching, the proxy waits for the app to become
 ready and then sends the original command, so the user does not have to repeat
 it. If the configured executable does not exist, the proxy shows an error
 dialog instead of failing silently.
+
+## Development checks
+
+The CI workflow runs:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo audit
+```
+
+`cargo audit` checks the locked dependency graph for RustSec advisories. Release
+builds also use the size-focused profile in `Cargo.toml` (`opt-level = "s"`,
+thin LTO, one codegen unit, stripped symbols), and the `zip` dependency is
+limited to the Deflate support needed for CRIS Tools build archives.

@@ -17,10 +17,18 @@ serde = { version = "1.0", features = ["derive"] }
 # Human-readable timestamps in the persistent proxy log.
 time = { version = "0.3", features = ["formatting"] }
 # Unpack the versioned build zip into the local run cache.
-zip = "2"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [build-dependencies]
 winres = "0.1.12"
+
+[profile.release]
+# Keep Dragon-launched downloads small. These settings only affect release
+# binaries; development and test profiles are unchanged.
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true

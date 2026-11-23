@@ -105,6 +105,11 @@ const APP_START_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_WAIT: Duration = Duration::from_secs(2);
 /// Poll interval for connection/token readiness while waiting.
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// One safe retry after a rate-limited response. The app drops the command
+/// without executing it, so resending once cannot duplicate an automation.
+const RATE_LIMIT_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Automation names are short identifiers; bound them before logging/sending.
+const MAX_COMMAND_NAME_LEN: usize = 128;
 
 /// Directory containing this executable, falling back to the working directory
 /// when the path cannot be resolved (e.g. `current_exe` fails).
@@ -500,6 +505,36 @@ fn wait_for_token(
         }
         thread::sleep(READY_POLL_INTERVAL);
     }
+}
+
+/// Reject names that would be ambiguous or make a log line unsafe. The app
+/// splits the wire request on `/`, so a slash cannot be part of a command.
+fn validate_command_name(command: &str) -> Result<(), String> {
+    if command.is_empty() {
+        return Err("The command name cannot be empty.".to_string());
+    }
+    if command.len() > MAX_COMMAND_NAME_LEN {
+        return Err(format!(
+            "The command name is longer than {MAX_COMMAND_NAME_LEN} bytes."
+        ));
+    }
+    if command
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(
+            "The command name cannot contain spaces, tabs or control characters.".to_string(),
+        );
+    }
+    if command.contains('/') || command.contains('\\') {
+        return Err("The command name cannot contain '/' or '\\'.".to_string());
+    }
+    Ok(())
+}
+
+/// A rate-limited command was not executed, so one short retry is safe.
+fn should_retry_rate_limit(response: &str, already_retried: bool) -> bool {
+    !already_retried && response.trim() == "rate limited"
 }
 
 /// Build the wire message. The tokened form is `run/<token>/<command>`; the
@@ -1012,7 +1047,13 @@ fn main() {
     // Tools is running, so launch it without prompting in that case.
     let command = std::env::args().nth(1).filter(|arg| !arg.is_empty());
     match &command {
-        Some(command) => log_line("INFO", &format!("Requested command: {command}")),
+        Some(command) => {
+            if let Err(message) = validate_command_name(command) {
+                show_error("Invalid CRIS Tools command", &message);
+                std::process::exit(1);
+            }
+            log_line("INFO", &format!("Requested command: {command}"));
+        }
         None => log_line(
             "INFO",
             "No command supplied; ensuring CRIS Tools is running",
@@ -1154,7 +1195,8 @@ fn main() {
         );
     }
 
-    // Send the argument to the server
+    // Send the argument and receive the response. A rate-limited command is
+    // retried once after a short pause; the app has not executed it.
     let message = command_message(token.as_deref(), &arg);
     log_line(
         "INFO",
@@ -1163,31 +1205,38 @@ fn main() {
             if token.is_some() { "tokened" } else { "legacy" }
         ),
     );
-    if let Err(e) = socket.send(message.as_bytes()) {
-        show_error(
-            "Failed to send command",
-            &format!("Could not send the command to CRIS Tools:\n{e:?}"),
-        );
-        std::process::exit(1);
-    }
+    let mut retried_rate_limit = false;
+    let response = loop {
+        if let Err(e) = socket.send(message.as_bytes()) {
+            show_error(
+                "Failed to send command",
+                &format!("Could not send the command to CRIS Tools:\n{e:?}"),
+            );
+            std::process::exit(1);
+        }
 
-    // Receive the response from the server
-    match socket.recv() {
-        Ok(response) => match String::from_utf8(response.to_vec()) {
-            Ok(response) => {
-                log_line(
-                    "INFO",
+        let payload = match socket.recv() {
+            Ok(payload) => payload,
+            Err(Error::TimedOut) => {
+                show_error(
+                    "CRIS Tools did not respond",
                     &format!(
-                        "Response: {}",
-                        response.chars().take(200).collect::<String>()
+                        "No response from CRIS Tools within {} ms.",
+                        settings.timeout_ms
                     ),
                 );
-                if let Some((title, description)) = response_error(&response, &arg) {
-                    show_error(title, &description);
-                    std::process::exit(1);
-                }
-                println!("Response: {}", response)
+                std::process::exit(1);
             }
+            Err(e) => {
+                show_error(
+                    "Failed to receive response",
+                    &format!("Could not read the response from CRIS Tools:\n{e:?}"),
+                );
+                std::process::exit(1);
+            }
+        };
+        let text = match String::from_utf8(payload.to_vec()) {
+            Ok(text) => text,
             Err(_) => {
                 show_error(
                     "Invalid response",
@@ -1195,30 +1244,86 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-        },
-        Err(Error::TimedOut) => {
-            show_error(
-                "CRIS Tools did not respond",
+        };
+
+        if should_retry_rate_limit(&text, retried_rate_limit) {
+            retried_rate_limit = true;
+            log_line(
+                "WARN",
                 &format!(
-                    "No response from CRIS Tools within {} ms.",
-                    settings.timeout_ms
+                    "Rate limited; retrying command once in {} ms",
+                    RATE_LIMIT_RETRY_DELAY.as_millis()
                 ),
             );
-            std::process::exit(1);
+            thread::sleep(RATE_LIMIT_RETRY_DELAY);
+            continue;
         }
-        Err(e) => {
-            show_error(
-                "Failed to receive response",
-                &format!("Could not read the response from CRIS Tools:\n{e:?}"),
-            );
-            std::process::exit(1);
-        }
+        break text;
+    };
+
+    log_line(
+        "INFO",
+        &format!(
+            "Response: {}",
+            response.chars().take(200).collect::<String>()
+        ),
+    );
+    if let Some((title, description)) = response_error(&response, &arg) {
+        show_error(title, &description);
+        std::process::exit(1);
     }
+    println!("Response: {}", response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_a_deflated_build_archive() {
+        let dir = std::env::temp_dir().join(format!("proxy-zip-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let archive_path = dir.join("build.zip");
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            archive
+                .start_file("cris_tools/cris_tools.exe", options)
+                .unwrap();
+            archive.write_all(b"exe").unwrap();
+            archive.finish().unwrap();
+        }
+        let destination = dir.join("out");
+        extract_zip(&archive_path, &destination, None).unwrap();
+        assert_eq!(
+            fs::read(destination.join("cris_tools/cris_tools.exe")).unwrap(),
+            b"exe"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_names_are_validated_before_sending() {
+        assert!(validate_command_name("load_event_history").is_ok());
+        assert!(validate_command_name("mdt-v2.1").is_ok());
+        assert!(validate_command_name("").is_err());
+        assert!(validate_command_name("load event").is_err());
+        assert!(validate_command_name("load\nevent").is_err());
+        assert!(validate_command_name("load\tevent").is_err());
+        assert!(validate_command_name("load/event").is_err());
+        assert!(validate_command_name("load\\event").is_err());
+        assert!(validate_command_name(&"x".repeat(MAX_COMMAND_NAME_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn only_the_first_rate_limit_attempt_is_retried() {
+        assert!(should_retry_rate_limit("rate limited", false));
+        assert!(!should_retry_rate_limit("rate limited", true));
+        assert!(!should_retry_rate_limit("received", false));
+    }
 
     #[test]
     fn tokened_message_includes_token() {
