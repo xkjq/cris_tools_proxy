@@ -1,7 +1,13 @@
+<p align="center">
+  <img src="icons/logo.png" alt="CRIS Tools Proxy" width="480">
+</p>
+
 # cris_tools_proxy
 
 A small Rust program that lets voice commands (for example from Dragon) drive
 CRIS Tools over a local socket. If CRIS Tools is not running it will launch it.
+Release builds use the Windows GUI subsystem, so Dragon does not get a console
+flash; diagnostics still go to the per-user proxy log.
 
 ```
 cris_tools_proxy.exe [command]
@@ -32,6 +38,9 @@ reads the same file and includes the token on every request.
 file is missing rather than silently falling back to the rejected legacy form.
 Set it to `false` only while rolling out a newer proxy against older app builds
 that still accept `run/<command>`; once the app requires tokens, leave it on.
+CRIS Tools now gives the token and diagnostics an owner-only Windows ACL. If the
+proxy runs under a different account, it reports the resulting permission error
+explicitly instead of claiming the token was never written.
 
 ## Command allowlist and refusal responses
 
@@ -84,6 +93,11 @@ cache (`%LOCALAPPDATA%\cris-tools\run\<version>\`), and launches it from there
 with `CRIS_TOOLS_DATA_DIR` pointed back at the share so `config/`, `plugins/`
 and logs stay shared. Running from a local cache keeps startup fast and avoids
 per-launch AV extraction. Cancelling the progress dialog aborts the launch.
+
+The Windows executable embeds `icons/icon.ico` and version metadata through
+`build.rs`, so Explorer, shortcuts and the taskbar show the CRIS Tools icon.
+The banner above uses `icons/logo.png`; see `icons/README.md` for the resize
+commands used to generate both assets.
 
 If the user picks "always launch", the proxy saves `launch_without_prompt = true`
 in a per-user preferences file (`%LOCALAPPDATA%\cris-tools\prefs.toml` by

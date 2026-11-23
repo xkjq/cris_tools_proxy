@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use nng::options::{Options, RecvTimeout, SendTimeout};
 use nng::{Error, Protocol, Socket};
 use rfd::{MessageDialog, MessageLevel};
@@ -446,6 +451,31 @@ fn read_ipc_token(settings: &Settings, settings_dir: &Path) -> Option<String> {
     let token = fs::read_to_string(path).ok()?;
     let token = token.trim().to_string();
     (!token.is_empty()).then_some(token)
+}
+
+/// Explain why a required token could not be read. This distinguishes an
+/// owner-only ACL failure from the normal "app has not written it yet" case,
+/// which matters when the proxy runs under a different Windows account.
+fn token_read_error(settings: &Settings, settings_dir: &Path) -> Option<String> {
+    let path = ipc_token_path(settings, settings_dir)?;
+    match fs::read_to_string(&path) {
+        Ok(contents) if contents.trim().is_empty() => Some(format!(
+            "The IPC token file {} is empty. Restart CRIS Tools and try again.",
+            path.display()
+        )),
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(format!(
+            "The IPC token file {} exists but this account cannot read it.\n\n\
+             Run the proxy as the same Windows user as CRIS Tools, or ask the \
+             deployment owner to adjust the token file ACL.",
+            path.display()
+        )),
+        Err(error) => Some(format!(
+            "Could not read the IPC token file {}:\n{error}",
+            path.display()
+        )),
+    }
 }
 
 /// Poll for the IPC token for a short window. The app writes it around the time
@@ -1110,11 +1140,12 @@ fn main() {
             &format!("IPC token read successfully ({} characters)", token.len()),
         );
     } else if settings.require_token {
-        log_line("ERROR", "IPC token not found; command not sent");
-        show_error(
-            "CRIS Tools IPC token not found",
-            "CRIS Tools is running but has not published its IPC token. Is it fully started?",
-        );
+        let problem = token_read_error(&settings, &settings_dir).unwrap_or_else(|| {
+            "CRIS Tools is running but has not published its IPC token. Is it fully started?"
+                .to_string()
+        });
+        log_line("ERROR", &format!("IPC token unavailable: {problem}"));
+        show_error("CRIS Tools IPC token unavailable", &problem);
         std::process::exit(1);
     } else {
         log_line(
@@ -1407,6 +1438,47 @@ mod tests {
             .as_deref(),
             Some("new-token")
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_token_has_no_read_error() {
+        let settings = Settings {
+            cris_tools_path: Some(PathBuf::from("missing")),
+            port: 5555,
+            host: default_host(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            app_root: None,
+            require_token: true,
+            ipc_token_file: Some(PathBuf::from("definitely-not-here.ipc")),
+            launch_without_prompt: false,
+            preferences_file: None,
+        };
+        assert!(token_read_error(&settings, Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn empty_token_has_a_clear_error() {
+        let dir = std::env::temp_dir().join(format!("proxy-token-empty-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ipc.token");
+        fs::write(&path, "  \n").unwrap();
+        let settings = Settings {
+            cris_tools_path: Some(PathBuf::from("missing")),
+            port: 5555,
+            host: default_host(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            app_root: None,
+            require_token: true,
+            ipc_token_file: Some(path),
+            launch_without_prompt: false,
+            preferences_file: None,
+        };
+
+        assert!(token_read_error(&settings, Path::new("."))
+            .unwrap()
+            .contains("is empty"));
 
         let _ = fs::remove_dir_all(&dir);
     }
